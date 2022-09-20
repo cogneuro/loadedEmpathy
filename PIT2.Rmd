@@ -37,6 +37,8 @@ pacman::p_load(tidyverse, psych)
 pacman::p_load(ggpubr, gghalves, knitr, cowplot, ggbeeswarm)
 pacman::p_load(rstatix, permuco, Superpower, MPTinR, MKinfer, boot)
 
+pacman::p_load_gh("RLesur/klippy", "mitchelloharawild/icons")
+
 options(knitr.kable.NA = '')
 options(dplyr.summarise.inform=FALSE) # suppress warning in regards to regrouping 
 
@@ -305,7 +307,7 @@ dd %>%
 
 Cowan's K를 추정하였다([Rouder et al., 2011, PBR](https://link.springer.com/article/10.3758/s13423-011-0055-3)).
 
-```{r, collapse=TRUE}
+```{r, collapse=TRUE, fig.height=3}
 wk <- dd %>%
 	filter(Load == 'High') %>% 
 	group_by(SID, sameDiff) %>% 
@@ -1923,3 +1925,6 @@ mcomp.res1[, c("model", "n.parameters" ,"G.Squared.aggregated",
 ```{r sinfo, collapse=TRUE}
 sessionInfo()
 ```
+
+***
+[[View on Github `r icon_style(fontawesome("github-alt", style = "brands"), scale = 4, fill = "#56B4E9")`](https://github.com/cogneuro/loadedEmpathy)]{style="float:right"}
