@@ -1,0 +1,1925 @@
+---
+title: "Multinomial Processing Tree Modeling of Pain Empathy"
+author: "Seongyun Kim & Do-Joon Yi"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: 
+      collapse: false
+      smooth_scroll: false
+    number_sections: true
+    theme: cosmo 
+    highlight: haddock
+    code_folding: hide
+subtitle: Effects of Working Memory Load on Pain Identification 
+mainfont: Noto Sans CJK KR
+---
+
+```{r setwd, echo=FALSE}
+setwd('~/Dropbox/2017Experiment/PIT1')
+```
+
+```{css, echo=FALSE}
+pre code, pre, code {
+  white-space: pre !important;
+  overflow-x: scroll !important;
+  word-break: keep-all !important;
+  word-wrap: initial !important;
+}
+```
+
+```{r setup, message=FALSE}
+set.seed(123456) # for reproducibility
+
+pacman::p_load(tidyverse, psych)
+pacman::p_load(ggpubr, gghalves, knitr, cowplot, ggbeeswarm)
+pacman::p_load(rstatix, permuco, Superpower, MPTinR, MKinfer, boot)
+
+options(knitr.kable.NA = '')
+options(dplyr.summarise.inform=FALSE) # suppress warning in regards to regrouping 
+
+klippy::klippy()
+
+nsims <- 1e4
+
+## Excluding Ss
+rm_subject <- function(df, rx){
+  for (i in rx){
+    df <- df %>% filter(SID != i) %>% droplevels()
+  }
+  cat(sprintf('%d removed & %d left', 
+              length(unique(rx)),
+              length(unique(df$SID))))
+  return(df)
+}
+
+## Plot
+# stat summary plot to 25% quartile and 75% quartile
+# https://bit.ly/3iFpV07
+single_raincloud_plot <- function(df, Y, xMin, xMax, xBy, xLab){
+	df %>% ggplot(aes(x = 1, y = Y)) +
+		geom_half_violin(aes(y = Y), side = "r", 
+										 color = "grey70", fill = "grey70") +
+		geom_half_point(aes(y = Y), side = "l", size = 2,
+										color = "grey50", fill = "grey50", alpha = .5) +
+		geom_pointrange(stat = "summary",
+										fun.min = function(z) {quantile(z,0.25)},
+										fun.max = function(z) {quantile(z,0.75)},
+										fun = median, color = "darkred", size = 1) +
+		scale_y_continuous(breaks=seq(xMin,xMax,by=xBy)) +
+		coord_flip(ylim = c(xMin, xMax), clip = "on") +
+		labs(y = xLab) +
+		theme_bw(base_size = 18) +
+		theme(panel.grid.major = element_blank(),
+					panel.grid.minor = element_blank(),
+					axis.title.y = element_blank(),
+					axis.ticks.y = element_blank(),
+					axis.text.y = element_blank(),
+					aspect.ratio = .3)
+}
+```
+
+
+# Procedure
+
+```{r}
+ggdraw() + draw_image("fig/Fig_proc.png")
+```
+
+<br><br>
+
+****
+
+<br><br>
+
+
+# Performance Check
+
+원자료를 정리하고, 온라인 참가자들이 지시를 잘 따랐는지 확인한다.
+
+```{r, collapse=TRUE}
+d <- read_csv('data/PIT2_dataN46.csv', show_col_types = FALSE)
+
+d %>% summarise(SN = n_distinct(SID)) 
+
+table(d$SID)
+
+unique(d$Prime)
+unique(d$Target)
+
+table(d$Load, d$SID)
+
+# group과 block은 역균형화를 위한 변수;
+# group: 반응키 counterbalancing
+#   (A, B; A - 우세손의 왼쪽이 고통 반응키, B - 우세손의 오른쪽이 고통 반응키)
+table(d$group, d$SID)
+
+# block: 블록 counterbalancing
+#   (H, L; H - 고부하 블록부터 시작, HLLHHLLH, L - 저부하 블록부터 시작 LHHLLHHL)
+table(d$block, d$SID)
+
+table(d$Load, d$group)
+table(d$Load, d$block)
+
+table(d$sameDiff)
+table(d$Congruent)
+table(d$PIT_corr)
+table(d$WM_corr)
+
+table(d$Load, d$WM_corr)
+table(d$Load, d$PIT_corr)
+
+d %>% mutate(Cong = Prime==Target,
+             Check = Cong!=Congruent) %>%
+  summarise(Check = sum(Check))  # Prime, Taget 변인 불필요.
+
+d$SID <- factor(d$SID)
+d$Load <- factor(d$Load)
+d$Prime <- factor(d$Prime, levels=c("pain","nonpain"), labels=c("Pain","Nonpain"))
+d$Target <- factor(d$Target, levels=c("pain","nonpain"), labels=c("Pain","Nonpain"))
+d$Congruency <- factor(d$Congruent, levels=c(1,0), labels=c("Congruent","Incongruent"))
+d$sameDiff <- factor(d$sameDiff, levels=c(1, 0), labels=c("Same","Different"))
+
+d <- d %>% select(SID, Load, sameDiff, WM_corr, WM_rt, Prime, Target, Congruency, PIT_corr, PIT_rt)
+str(d)
+
+table(d$Load, d$Congruency)
+# 참가자당 256시행. 참가자당 & 조건당 64시행
+```
+
+
+## Working Memory Task
+
+```{r, collapse=TRUE, fig.height=3}
+d.sum <- d %>% 
+	filter(Load == 'High') %>% 
+	group_by(SID) %>% 
+	summarise(WMerror = (1 - mean(WM_corr))*100) %>% 
+	ungroup() %>% 
+	summarise(MN = mean(WMerror)
+						, SD = sd(WMerror)
+						, MIN = min(WMerror)
+						, MAX = max(WMerror)
+						, Q1 = quantile(WMerror, prob = .25)
+						, MED = median(WMerror)
+						, Q3 = quantile(WMerror, prob = .75)
+						,	IQR = IQR(WMerror)
+						, Outlier = Q3 + 1.5 * IQR
+						, Extreme = Q3 + 3 * IQR) 
+d.sum %>% 
+	kable(digits = 2, caption = "WM Error (%): Distribution")
+
+d %>% 
+	filter(Load == 'High') %>% 
+	group_by(SID) %>% 
+	summarise(WMerror = (1 - mean(WM_corr))*100) %>% 
+	ungroup() %>% 
+	filter(WMerror > 30) %>% 
+	print(n = Inf) 
+# 아래 PIT 가외치 명단과 대부분 겹친다. 
+
+d %>% 
+	filter(Load == 'High') %>% 
+	group_by(SID) %>% 
+	summarise(WMerror = (1 - mean(WM_corr))*100) %>% 
+	ungroup() %>%
+	identify_outliers(WMerror) # IQR 기준 가외치 없음.
+
+d %>% 
+	filter(Load == 'High') %>% 
+	group_by(SID) %>% 
+	summarise(WMerror = (1 - mean(WM_corr))*100) %>% 
+	ungroup() %>%
+	single_raincloud_plot(.$WMerror, 0, 100, 10, "WM Error (%)") + 
+	geom_hline(yintercept=50, linetype="dotted") +
+	geom_hline(yintercept=d.sum$Outlier, linetype='dashed', color='red', size=0.5)
+```
+
+작업기억 오류율이 비교적 넓게 퍼져있어서 가외치를 정의하기 어렵다. 대략 30% 이상 오류를 범한 참가자들은 아래 PIT 오류율 가외치와 대체로 겹친다. 
+
+
+<br><br>
+
+## Pain Identification Task
+
+2 `Load` x 2 `Congruency` 설계에서 조건 당 64시행씩 제시되었다.
+
+```{r, collapse=TRUE, fig.height=3}
+# d %>% group_by(SID, Load, Congruency) %>% 
+# 	summarise(PITerror = (1 - mean(PIT_corr))*100,
+# 						N = n()) %>% 
+# 	ungroup() %>% 
+# 	print(n = Inf) # 4조건, 각 64시행
+
+# 고부하 구획 반응 확인: 2초 넘으면 PIT_rt = na, PIT_corr = 0으로 입력되어 있음.
+d %>% filter(Load == "High") %>%
+	summarise(MN = mean(PIT_rt, na.rm = TRUE), # na.rm은 반응 누락 시행
+						SD = sd(PIT_rt, na.rm = TRUE),
+						Max = max(PIT_rt, na.rm = TRUE))
+# 고부하 구획에서는 반응시간 최대값이 2초를 넘지 않는다.
+
+# ( n2 <- d %>% filter(Load == "Low", PIT_rt > 2) %>% nrow() )  # 아래 코드와 같다.
+( n2 <- d %>% filter(PIT_rt > 2) %>% nrow() ) # 저부하에서 2초 넘는 시행은 139
+100*n2/nrow(d) # 1.18 %
+
+# 저부하 시행도 2초 넘으면 오답 처리 -> PIT_corr2
+d <- d %>% 
+	mutate(PIT_corr2 = ifelse(Load == "High" | PIT_rt < 2, PIT_corr, 0))
+
+d.sum <- d %>% 
+	group_by(SID) %>% 
+	summarise(PITerror = (1 - mean(PIT_corr2))*100) %>% 
+	ungroup() %>% 
+	summarise(MN = mean(PITerror)
+						, SD = sd(PITerror)
+						, MIN = min(PITerror)
+						, MAX = max(PITerror)
+						, Q1 = quantile(PITerror, prob = .25)
+						, MED = median(PITerror)
+						, Q3 = quantile(PITerror, prob = .75)
+						,	IQR = IQR(PITerror)
+						, Outlier = Q3 + 1.5 * IQR
+						, Extreme = Q3 + 3 * IQR) 
+d.sum %>% 
+	kable(digits = 2, caption = "WM Error (%): Distribution")
+
+d %>% 
+	group_by(SID) %>% 
+	summarise(PITerror = (1 - mean(PIT_corr2))*100) %>% 
+	ungroup() %>% 
+	identify_outliers(PITerror)
+
+d %>% 
+	group_by(SID) %>% 
+	summarise(PITerror = (1 - mean(PIT_corr2))*100) %>% 
+	ungroup() %>% 
+	single_raincloud_plot(.$PITerror, 0, 100, 10, "PIT Error (%)") + 
+	geom_hline(yintercept=50, linetype='dotted') +
+	geom_hline(yintercept=d.sum$Outlier, linetype='dashed', color='red', size=0.5)
+```
+
+`rstatix::identify_outliers()` 함수를 사용하여 Q3 + 1.5*IQR = `r format(round(d.sum$Outlier, 2), nsmall=2)` %보다 PIT 오류를 많이 범한 참가자 여덟 명을 가외치(outlier)로 판정하였다. 이 참가자들을 분석에서 제외한다.
+
+```{r, comment=NA, collapse=TRUE}
+d2 <- rm_subject(d, c(1, 8, 30, 32, 33, 35, 45, 46)) # 38
+
+# 저부하 시행의 WM_corr = NA를 WM_corr = 1 로 변환 -> WM_corr2 
+dd <- d2 %>% 
+	mutate(WM_corr2 = ifelse(Load == 'Low', 1, ifelse(WM_corr == 1, 1, 0)),
+				 DL1s = ifelse(is.na(PIT_rt), 0, ifelse(PIT_rt >= 1.00, 0, 1)),
+				 DL2s = ifelse(is.na(PIT_rt), 0, ifelse(PIT_rt >= 2.00, 0, 1)),
+				 PIT_corr1s = PIT_corr2 * DL1s,
+				 PIT_corr2s = PIT_corr2 * DL2s) %>% 
+	select(SID, Load, sameDiff, Prime, Target, Congruency, WM_corr2, PIT_corr1s, PIT_corr2s, PIT_rt)
+headTail(dd)
+```
+
+
+<br><br>
+
+------------------------------------------------------------------------
+
+<br><br>
+
+# WM Performance
+
+**High Load** 조건의 작업기억 오류율을 분석하였다.
+
+```{r}
+# 상관 분석 위해 계산 
+wd <- dd %>%
+	filter(Load == 'High') %>% 
+	group_by(SID) %>% 
+	summarise(WMerror = (1 - mean(WM_corr2))*100) 
+
+dd %>%
+	filter(Load == 'High') %>% 
+	group_by(SID) %>% 
+	summarise(WMerror = (1 - mean(WM_corr2))*100) %>% 
+	ungroup() %>% 
+	get_summary_stats(WMerror, show = c("mean", "sd", "median", "iqr", "ci")) %>% 
+	kable(digits = 2, caption = "High Load WM Error (%): Descriptive Stats")
+```
+
+Cowan's K를 추정하였다([Rouder et al., 2011, PBR](https://link.springer.com/article/10.3758/s13423-011-0055-3)).
+
+```{r, collapse=TRUE}
+wk <- dd %>%
+	filter(Load == 'High') %>% 
+	group_by(SID, sameDiff) %>% 
+	summarise(WMacc = mean(WM_corr2)) %>% 
+	ungroup() %>% 
+	pivot_wider(id_cols = SID, names_from = sameDiff, values_from = WMacc) %>% 
+	mutate(cowanK = 4 * (Same - (1 - Different))) %>% 
+	select(SID, cowanK)
+
+range(wk$cowanK)
+
+wk %>% 
+	get_summary_stats(cowanK, show = c("mean", "sd", "median", "iqr", "ci")) %>% 
+	kable(digits = 4, caption = "High Load Cowan's K: Descriptive Stats")
+
+wk %>% 
+	single_raincloud_plot(.$cowanK, 0, 4, 1, "Cowan's K")
+```
+
+
+<br><br>
+
+------------------------------------------------------------------------
+
+<br><br>
+
+
+# PIT Performance
+
+```{r, collapse = TRUE}
+( m3 <- dd %>% filter(Load == 'Low') %>% nrow() )
+( n3 <- dd %>% filter(Load == 'Low', PIT_rt > 2) %>% nrow() ) # 저부하에서 2초 넘는 시행은 58
+n3*100/m3 # 1.19%
+
+( m4 <- dd %>% filter(Load == 'High') %>% nrow() )
+( n4 <- dd %>% filter(Load == 'High', PIT_rt < 2) %>% nrow() ) # 고부하에서 2초 넘는 시행은 118시행
+(m4-n4)*100/m4 # 2.43%
+```
+
+고부하(**high load**) 구획에서 PIT 과제는 2초 후에 종료되었지만 저부하(**low load**) 구획에서는 참가자가 반응해야 종료되었다. 따라서 저부하 구획에서 PIT RT가 2초를 넘는 총 `r n3` 시행(`r format(round(100*n3/m3, 2), nsmall=2)` %)을 '무반응(=오류)' 처리하였다.
+
+고부하 구획에서 반응이 누락된(즉, 2초 전에 반응이 입력되지 못한) 총 `r m4 - n4` 시행(`r format(round(100*(m4 - n4)/m4, 2), nsmall=2)` %)도 '무반응(=오류)' 처리하였다.
+
+유효 시행수를 최대한 확보하기 위해 작업기억 정확도와 상관없이 PIT 수행을 분석하였다.
+
+[`rstatix` ANOVA 메뉴얼](https://www.datanovia.com/en/lessons/anova-in-r/#two-way-independent-anova)에 따라 분석하였다. 오류율이 정규성 가정에 위배되므로 모든 자료에 대해 비모수적 순열검증(permutation test)을 실시하였다. 
+
+
+## Deadline = 2sec
+
+### Percentage Error
+
+`Load` 주효과 없이 `Congruency` 주효과(**incongruent > congruent**)만 있다.
+
+```{r, collapse=TRUE}
+ed.slong <- dd %>%
+	# filter(WM_corr2 == 1) %>% # 작업기억 정반응만 포함 
+	group_by(SID, Load, Congruency) %>% 
+	summarise(PITerror = (1 - mean(PIT_corr2s))*100) %>% 
+	ungroup() %>% 
+	mutate(Load = factor(Load, levels = c("Low", "High"), 
+											 labels = c("Low", "High")))
+
+# ed.slong %>% sample_n_by(Load, Congruency, size = 2) # 조건별 랜덤 샘플림
+
+sumEd <- ed.slong %>%
+	group_by(Load, Congruency) %>%
+	get_summary_stats(PITerror, show = c("mean", "sd", "median", "iqr", "ci"))
+sumEd %>% 
+	kable(digits = 2, caption = "PIT Error (%): Descriptive Stats")
+
+ed.slong %>% ggplot(aes(x = factor(Load, level = c('Low', 'High')),
+												y = PITerror,	color = Congruency)) +
+	geom_half_boxplot(side = "r", outlier.shape = NA) +
+	geom_half_point(side = "l", show.legend = FALSE) +
+	scale_color_manual(values=c("#E69F00", "#56B4E9"),
+										 labels=c("Congruent", "Incongruent")) +
+	# coord_cartesian(ylim = c(0, 25), clip = "on") +
+	scale_y_continuous(breaks=seq(0, 25, by=5)) +
+	labs(x = "Load",
+			 y = "Pain Identification Error (%)",
+			 fill='Congruency') +
+	theme_bw(base_size = 18) +
+	theme(panel.grid.major = element_blank(),
+				panel.grid.minor = element_blank())
+
+# Build the linear model
+model  <- lm(PITerror ~ Load*Congruency, data = ed.slong)
+
+# # Create a QQ plot of residuals
+# ggqqplot(residuals(model))
+# ggqqplot(ed.slong, "PITerror", ggtheme = theme_bw()) +
+# 	facet_grid(Load ~ Congruency)
+
+ed.slong %>%
+	group_by(Load, Congruency) %>%
+	shapiro_test(PITerror)
+
+# Compute Shapiro-Wilk test of normality
+shapiro_test(residuals(model)) %>% 
+	kable(digits = 2, caption = "Shapiro-Wilk test of normality")
+
+# Homogneity of variance assumption
+ed.slong %>% levene_test(PITerror ~ Load*Congruency) %>% 
+	kable(digits = 2, caption = "Homogneity of variance assumption")
+
+# parametric ANOVA: no use
+ed.slong %>%
+	anova_test(dv = PITerror, wid = SID,
+						 within = c(Load, Congruency),
+						 effect.size = "pes") %>%
+	get_anova_table(correction = "auto")
+
+# two-way permutation anova
+PITerror.perm <- 
+	aovperm(PITerror ~ Load * Congruency + Error(SID/(Load*Congruency)),
+					data = ed.slong, np = nsims)
+summary(PITerror.perm) %>%
+	kable(digits = c(0,2,2,2,2,2,2,2,3,3), caption = "Nonparametric ANOVA")
+
+# effect size
+dxEd <- ANOVA_design(
+	design = "2w*2w", 
+	n = sumEd$n,
+	mu = sumEd$mean, 
+	sd = sumEd$sd,
+	labelnames = c("LOAD", "Low", "High", 
+								 "CONGRUENCY", "Cong", "Incong"),
+	plot = FALSE
+)
+
+pwrEd <- ANOVA_power(dxEd, verbose = FALSE, nsims = nsims)
+pwrEd$main_results %>% 
+	kable(digits = c(0,2,3), caption = "Power & Effect Size")
+```
+
+
+<br><br>
+
+
+### Response Time
+
+반응시간 200ms 미만인 반응(anticipatory responses)은 한 시행도 없었다. 개별 참가자 반응시간에 $\mu \pm3SD$ 기준을 적용하여 1.7% 시행을 가외치로 분석에서 제외하였다. 남은 반응시간의 참가자별 평균은 아래와 같이 대체로 균일하였다.
+
+```{r, collapse=TRUE, fig.height=3}
+nCorr <- dd %>% 
+	# filter(WM_corr2==1) %>% 
+	filter(PIT_corr2s == 1) %>% 
+	nrow()
+nAnticip <- dd %>% 
+	# filter(WM_corr2 == 1) %>% 
+	filter(PIT_corr2s == 1, PIT_rt < .2) %>% 
+	nrow()
+nAnticip /nCorr # 기대반응 없었다.
+
+td <- dd %>% 
+	# filter(WM_corr2 == 1) %>% 
+	filter(PIT_corr2s == 1) %>% 
+	group_by(SID) %>% 
+	nest() %>%
+	mutate(lbound = map(data, ~mean(.$PIT_rt)-3*sd(.$PIT_rt)),
+				 ubound = map(data, ~mean(.$PIT_rt)+3*sd(.$PIT_rt))) %>%
+	unnest(c(lbound, ubound)) %>%
+	unnest(data) %>%
+	mutate(Outlier = (PIT_rt < lbound)|(PIT_rt > ubound)) %>%
+	filter(Outlier == FALSE) %>%
+	ungroup() %>%
+	select(SID, Load, Congruency, PIT_rt)
+
+range(td$PIT_rt) # 최소 & 최대 
+
+nVal <- td %>% nrow()
+(nCorr - nVal)/nCorr # 1.7% trimmed
+
+td %>% group_by(SID) %>% 
+	summarise(RT = mean(PIT_rt)) %>% 
+	ungroup() %>% 
+	single_raincloud_plot(.$RT, 0, 2, 0.2, "Pain Identification Time (s)") 
+```
+
+`Load` 효과(**high load > low load**)와 `Congruency` 효과(**incongruent > congruent**)가 뚜렷하다. 상호작용은 보이지 않는다.
+
+```{r, collapse=TRUE}
+td.slong <- td %>% 
+	group_by(SID, Load, Congruency) %>% 
+	summarise(RT = mean(PIT_rt)*1000) %>% 
+	ungroup() %>% 
+	mutate(Load = factor(Load, levels = c("Low", "High"), 
+											 labels = c("Low", "High")))
+str(td.slong)
+
+sumTd <- td.slong %>%
+	group_by(Load, Congruency) %>%
+	get_summary_stats(RT, show = c("mean", "sd", "median", "iqr", "ci")) 
+sumTd %>% 
+	kable(digits = 2, caption = "PIT RT (sec) Descriptive Stats")
+
+td.slong %>%
+	mutate(RT = RT / 1000) %>%
+	ggplot(aes(x = factor(Load, level = c('Low', 'High')),
+						 y = RT,	color = Congruency)) +
+	geom_half_boxplot(side = "r", outlier.shape = NA) +
+	geom_half_point(side = "l", show.legend = FALSE) +
+	# coord_cartesian(ylim = c(0.5, 1.2), clip = "on") +
+	scale_y_continuous(breaks=seq(0.5, 1.2, by=0.1)) +
+	scale_color_manual(values=c("#E69F00", "#56B4E9"),
+										 labels=c("Congruent", "Incongruent")) +
+	labs(x = "Load",
+			 y = "Pain Identification Time (s)",
+			 fill='Congruency') +
+	theme_bw(base_size = 18) +
+	theme(panel.grid.major = element_blank(),
+				panel.grid.minor = element_blank())
+
+# # Build the linear model
+# model  <- lm(RT ~ Load*Congruency, data = td.slong)
+# 
+# # Create a QQ plot of residuals
+# ggqqplot(residuals(model))
+# ggqqplot(td.slong, "RT", ggtheme = theme_bw()) +
+# 	facet_grid(Load ~ Congruency)
+# 
+# td.slong %>%
+# 	group_by(Load, Congruency) %>%
+# 	shapiro_test(RT)
+# 
+# # Compute Shapiro-Wilk test of normality
+# shapiro_test(residuals(model)) %>% 
+#     kable(digits = 4, caption = "Shapiro-Wilk test of normality: All trials")
+# 
+# # Homogneity of variance assumption
+# td.slong %>% levene_test(RT ~ Load*Congruency) %>% 
+#     kable(digits = 4, caption = "Homogneity of variance assumption")
+
+# parametric ANOVA: no use
+td.slong %>%
+	anova_test(dv = RT, wid = SID,
+						 within = c(Load, Congruency),
+						 effect.size = "pes") %>%
+	get_anova_table(correction = "auto")
+
+# two-way permutation anova
+PITRT.perm <- 
+	aovperm(RT ~ Load * Congruency + Error(SID/(Load*Congruency)),
+					data = td.slong, np = nsims)
+summary(PITRT.perm) %>%
+	kable(digits = c(0,2,2,2,2,2,2,2,3,3), caption = "Nonparametric ANOVA")
+
+# effect size
+dxTd <- ANOVA_design(
+	design = "2w*2w", 
+	n = sumTd$n,
+	mu = sumTd$mean, 
+	sd = sumTd$sd,
+	labelnames = c("LOAD", "Low", "High", 
+								 "CONGRUENCY", "Cong", "Incong"),
+	plot = FALSE
+)
+
+pwrTd <- ANOVA_power(dxTd, verbose = FALSE, nsims = nsims)
+pwrTd$main_results %>% 
+	kable(digits = c(0,2,3), caption = "Power & Effect Size")
+```
+
+<br><br>
+
+
+### Correlation
+
+```{r}
+# PIT Error
+datB <- ed.slong %>% 
+	unite("Var", c(Load:Congruency)) %>% 
+	pivot_wider(id_cols = "SID", names_from = "Var", values_from = "PITerror") %>% 
+	mutate(Low_CE = Low_Incongruent - Low_Congruent,
+				 High_CE = High_Incongruent - High_Congruent,
+				 WM = wk$cowanK) %>% 
+	select(SID, WM, ends_with("CE"))
+
+tmpR <- datB %>% select(!SID) %>% cor_mat() 
+tmpP <- tmpR %>% cor_get_pval()
+
+pbonB <- p.adjust(tmpP$WM[2:3], "bonferroni")
+
+tibble(parameter = c("Pearson r", "Bonf.corr.p"),
+			 lowLoad = c(tmpR$WM[2], pbonB[1]),
+			 highLoad = c(tmpR$WM[3], pbonB[2])) %>% 
+	kable(align = 'c', digits = 3, caption = "Congruency in error rates vs. Cowan's K")
+
+# PIT RT
+datT <- td.slong %>% 
+	unite("Var", c(Load:Congruency)) %>% 
+	pivot_wider(id_cols = "SID", names_from = "Var", values_from = "RT") %>% 
+	mutate(Low_CE = Low_Incongruent - Low_Congruent,
+				 High_CE = High_Incongruent - High_Congruent,
+				 WM = wk$cowanK) %>% 
+	select(SID, WM, ends_with("CE"))
+
+tmpR2 <- datT %>% select(!SID) %>% cor_mat() 
+tmpP2 <- tmpR2 %>% cor_get_pval()
+
+pbonB2 <- p.adjust(tmpP2$WM[2:3], "bonferroni")
+
+tibble(parameter = c("Pearson r", "Bonf.corr.p"),
+			 lowLoad = c(tmpR2$WM[2], pbonB2[1]),
+			 highLoad = c(tmpR2$WM[3], pbonB2[2])) %>% 
+	kable(align = 'c', digits = 3, caption = "Congruency in RTs vs. Cowan's K")
+```
+
+
+
+
+<br><br><br><br>
+
+
+## Deadline = 1sec
+
+### Percentage Error
+
+`Load` 주효과(**high load > low load**)와 `Congruency` 주효과(**incongruent > congruent**)가 있다. 
+
+```{r, collapse=TRUE}
+edx.slong <- dd %>%
+	# filter(WM_corr2 == 1) %>% # 작업기억 정반응만 포함 
+	group_by(SID, Load, Congruency) %>% 
+	summarise(PITerror = (1 - mean(PIT_corr1s))*100) %>% 
+	ungroup() %>% 
+	mutate(Load = factor(Load, levels = c("Low", "High"), 
+											 labels = c("Low", "High")))
+
+sumEdx <- edx.slong %>%
+	group_by(Load, Congruency) %>%
+	get_summary_stats(PITerror, show = c("mean", "sd", "median", "iqr", "ci"))
+sumEdx %>% 
+	kable(digits = 2, caption = "PIT Error (%): Descriptive Stats")
+
+# plot
+edx.slong %>% ggplot(aes(x = factor(Load, level = c('Low', 'High')),
+												y = PITerror,	color = Congruency)) +
+	geom_half_boxplot(side = "r", outlier.shape = NA) +
+	geom_half_point(side = "l", show.legend = FALSE) +
+	scale_color_manual(values=c("#E69F00", "#56B4E9"),
+										 labels=c("Congruent", "Incongruent")) +
+	# coord_cartesian(ylim = c(0, 25), clip = "on") +
+	# scale_y_continuous(breaks=seq(0, 25, by=5)) +
+	labs(x = "Load",
+			 y = "Pain Identification Error (%)",
+			 fill='Congruency') +
+	theme_bw(base_size = 18) +
+	theme(panel.grid.major = element_blank(),
+				panel.grid.minor = element_blank())
+
+# parametric ANOVA: no use
+edx.slong %>%
+	anova_test(dv = PITerror, wid = SID,
+						 within = c(Load, Congruency),
+						 effect.size = "pes") %>%
+	get_anova_table(correction = "auto")
+
+# two-way permutation anova
+PITerrorX.perm <- 
+	aovperm(PITerror ~ Load * Congruency + Error(SID/(Load*Congruency)),
+					data = edx.slong, np = nsims)
+summary(PITerrorX.perm) %>%
+	kable(digits = c(0,2,2,2,2,2,2,2,5,3), caption = "Nonparametric ANOVA")
+
+# effect size
+dxEdx <- ANOVA_design(
+	design = "2w*2w", 
+	n = sumEdx$n,
+	mu = sumEdx$mean, 
+	sd = sumEdx$sd,
+	labelnames = c("LOAD", "Low", "High", 
+								 "CONGRUENCY", "Cong", "Incong"),
+	plot = FALSE
+)
+
+pwrEdx <- ANOVA_power(dxEdx, verbose = FALSE, nsims = nsims)
+pwrEdx$main_results %>% 
+	kable(digits = c(0,2,3), caption = "Power & Effect Size")
+```
+
+<br><br>
+
+### Response Time
+
+```{r, collapse=TRUE, fig.height=3}
+tdx <- dd %>% 
+	# filter(WM_corr2 == 1) %>% 
+	filter(PIT_corr1s == 1) %>% 
+	group_by(SID) %>% 
+	nest() %>%
+	mutate(lbound = map(data, ~mean(.$PIT_rt)-3*sd(.$PIT_rt)),
+				 ubound = map(data, ~mean(.$PIT_rt)+3*sd(.$PIT_rt))) %>%
+	unnest(c(lbound, ubound)) %>%
+	unnest(data) %>%
+	mutate(Outlier = (PIT_rt < lbound)|(PIT_rt > ubound)) %>%
+	filter(Outlier == FALSE) %>%
+	ungroup() %>%
+	select(SID, Load, Congruency, PIT_rt)
+
+range(tdx$PIT_rt) # 최소 & 최대 
+
+nCorr <- dd %>% 
+	# filter(WM_corr2==1) %>% 
+	filter(PIT_corr1s == 1) %>% 
+	nrow()
+nVal <- tdx %>% nrow()
+(nCorr - nVal)/nCorr # 0.3% trimmed
+
+tdx %>% group_by(SID) %>% 
+	summarise(RT = mean(PIT_rt)) %>% 
+	ungroup() %>% 
+	single_raincloud_plot(.$RT, 0, 2, 0.2, "Pain Identification Time (s)") 
+
+tdx.slong <- tdx %>% 
+	group_by(SID, Load, Congruency) %>% 
+	summarise(RT = mean(PIT_rt)*1000) %>% 
+	ungroup() %>% 
+	mutate(Load = factor(Load, levels = c("Low", "High"), 
+											 labels = c("Low", "High")))
+str(tdx.slong)
+
+sumTdx <- tdx.slong %>%
+	group_by(Load, Congruency) %>%
+	get_summary_stats(RT, show = c("mean", "sd", "median", "iqr", "ci")) 
+sumTdx %>% 
+	kable(digits = 2, caption = "PIT RT (sec) Descriptive Stats")
+```
+
+`Load` 효과(**high load > low load**)와 `Congruency` 효과(**incongruent > congruent**)가 뚜렷하다. 상호작용은 보이지 않는다.
+
+```{r, collapse=TRUE}
+tdx.slong %>%
+	mutate(RT = RT / 1000) %>%
+	ggplot(aes(x = factor(Load, level = c('Low', 'High')),
+						 y = RT,	color = Congruency)) +
+	geom_half_boxplot(side = "r", outlier.shape = NA) +
+	geom_half_point(side = "l", show.legend = FALSE) +
+	# coord_cartesian(ylim = c(0.5, 1.2), clip = "on") +
+	scale_y_continuous(breaks=seq(0.5, 1.2, by=0.1)) +
+	scale_color_manual(values=c("#E69F00", "#56B4E9"),
+										 labels=c("Congruent", "Incongruent")) +
+	labs(x = "Load",
+			 y = "Pain Identification Time (s)",
+			 fill='Congruency') +
+	theme_bw(base_size = 18) +
+	theme(panel.grid.major = element_blank(),
+				panel.grid.minor = element_blank())
+
+
+# parametric ANOVA: no use
+tdx.slong %>%
+	anova_test(dv = RT, wid = SID,
+						 within = c(Load, Congruency),
+						 effect.size = "pes") %>%
+	get_anova_table(correction = "auto")
+
+# two-way permutation anova
+PITRTx.perm <- 
+	aovperm(RT ~ Load * Congruency + Error(SID/(Load*Congruency)),
+					data = tdx.slong, np = nsims)
+summary(PITRTx.perm) %>%
+	kable(digits = c(0,2,2,2,2,2,2,2,5,3), caption = "Nonparametric ANOVA")
+
+# effect size
+dxTdx <- ANOVA_design(
+	design = "2w*2w", 
+	n = sumTdx$n,
+	mu = sumTdx$mean, 
+	sd = sumTdx$sd,
+	labelnames = c("LOAD", "Low", "High", 
+								 "CONGRUENCY", "Cong", "Incong"),
+	plot = FALSE
+)
+
+pwrTdx <- ANOVA_power(dxTdx, verbose = FALSE, nsims = nsims)
+pwrTdx$main_results %>% 
+	kable(digits = c(0,2,3), caption = "Power & Effect Size")
+```
+
+
+### Correlation with WM
+
+```{r}
+# PIT Error
+datB <- edx.slong %>% 
+	unite("Var", c(Load:Congruency)) %>% 
+	pivot_wider(id_cols = "SID", names_from = "Var", values_from = "PITerror") %>% 
+	mutate(Low_CE = Low_Incongruent - Low_Congruent,
+				 High_CE = High_Incongruent - High_Congruent,
+				 WM = wk$cowanK) %>% 
+	select(SID, WM, ends_with("CE"))
+
+tmpR <- datB %>% select(!SID) %>% cor_mat() 
+tmpP <- tmpR %>% cor_get_pval()
+
+pbonB <- p.adjust(tmpP$WM[2:3], "bonferroni")
+
+tibble(parameter = c("Pearson r", "Bonf.corr.p"),
+			 lowLoad = c(tmpR$WM[2], pbonB[1]),
+			 highLoad = c(tmpR$WM[3], pbonB[2])) %>% 
+	kable(align = 'c', digits = 3, caption = "Congruency in error rates vs. Cowan's K")
+
+# PIT RT
+datT <- tdx.slong %>% 
+	unite("Var", c(Load:Congruency)) %>% 
+	pivot_wider(id_cols = "SID", names_from = "Var", values_from = "RT") %>% 
+	mutate(Low_CE = Low_Incongruent - Low_Congruent,
+				 High_CE = High_Incongruent - High_Congruent,
+				 WM = wk$cowanK) %>% 
+	select(SID, WM, ends_with("CE"))
+
+tmpR2 <- datT %>% select(!SID) %>% cor_mat() 
+tmpP2 <- tmpR2 %>% cor_get_pval()
+
+pbonB2 <- p.adjust(tmpP2$WM[2:3], "bonferroni")
+
+tibble(parameter = c("Pearson r", "Bonf.corr.p"),
+			 lowLoad = c(tmpR2$WM[2], pbonB2[1]),
+			 highLoad = c(tmpR2$WM[3], pbonB2[2])) %>% 
+	kable(align = 'c', digits = 3, caption = "Congruency in RTs vs. Cowan's K")
+```
+
+
+
+<br><br><br><br>
+
+
+## Plot
+
+*Note.* Filled circles = 2s deadline. Empty circles = 1s deadline.
+
+```{r, collapse=TRUE}
+tmp1 <- edx.slong %>% # deadline 1s
+	group_by(Load, Congruency) %>%
+	get_summary_stats(PITerror, show = c("mean", "ci"))
+tmp3 <- ed.slong %>% # deadline 2s
+	group_by(Load, Congruency) %>%
+	get_summary_stats(PITerror, show = c("mean", "ci"))
+
+xSum <- rbind(tmp1, tmp3)
+xSum$Deadline <- factor(rep(c('DL1s', 'DL2s'), each = 4))
+xSum <- xSum %>% 
+	mutate(M = mean, 
+				 lower.conf = mean - ci,
+				 upper.conf = mean + ci) %>% 
+	select(variable, Deadline, Load, Congruency, M, lower.conf, upper.conf)
+str(xSum)
+
+error_width <- 0.3
+dodge_size0 <- 0.05
+dodge_size2 <- 0.6
+dl1 <- xSum %>% filter(variable == "PITerror", Deadline == "DL1s")
+dl2 <- xSum %>% filter(variable == "PITerror", Deadline == "DL2s")
+yf1 <- ggplot() + 
+	geom_errorbar(data = dl1, 
+								aes(x = as.numeric(Load)-dodge_size0, y = M, 
+										ymin = lower.conf, ymax = upper.conf, color = Congruency),
+								width=error_width, size=1,
+								position = position_dodge(width = dodge_size2)) +
+	geom_errorbar(data = dl2, 
+								aes(x = as.numeric(Load)+dodge_size0, y = M, 
+										ymin = lower.conf, ymax = upper.conf, color = Congruency),
+								width=error_width, size=1,
+								position = position_dodge(width = dodge_size2)) +
+	geom_point(data = dl1, 
+						 aes(x = as.numeric(Load)-dodge_size0, y = M, color = Congruency), 
+						 size=4, shape = 21, fill = "white", 
+						 position = position_dodge(width = dodge_size2)) +
+	geom_point(data = dl2, 
+						 aes(x = as.numeric(Load)+dodge_size0, y = M, 
+						 		color = Congruency, fill = Congruency), 
+						 size=4, shape = 21, 
+						 position = position_dodge(width = dodge_size2)) +
+	scale_color_manual(values=c("#E69F00", "#56B4E9")) +
+	scale_fill_manual(values=c("#E69F00", "#56B4E9")) +
+	scale_x_continuous(breaks = c(1, 2), label = c("Low", "High")) +
+	coord_cartesian(xlim = c(0.5, 2.5), ylim = c(0, 40), clip = "on") +
+	scale_y_continuous(breaks=seq(0, 40, by=10)) +
+	labs(x = "Load",
+			 y = "Pain Identification Error (%)",
+			 fill='Congruency')  +
+	theme_bw(base_size = 18) +
+	theme(panel.grid.major = element_blank(),
+				panel.grid.minor = element_blank(),
+				aspect.ratio = 1.3)
+yf1
+
+#  response time
+tmp2 <- tdx.slong %>% # deadline 1s
+	group_by(Load, Congruency) %>%
+	get_summary_stats(RT, show = c("mean", "ci"))
+
+tmp4 <- td.slong %>% # deadline 2s
+	group_by(Load, Congruency) %>%
+	get_summary_stats(RT, show = c("mean", "ci"))
+
+xSum2 <- rbind(tmp2, tmp4)
+xSum2$Deadline <- factor(rep(c('DL1s', 'DL2s'), each = 4))
+xSum2 <- xSum2 %>% 
+	mutate(M = mean, 
+				 lower.conf = mean - ci,
+				 upper.conf = mean + ci) %>% 
+	select(variable, Deadline, Load, Congruency, M, lower.conf, upper.conf)
+str(xSum2)
+
+dl3 <- xSum2 %>% filter(variable == "RT", Deadline == "DL1s")
+dl4 <- xSum2 %>% filter(variable == "RT", Deadline == "DL2s")
+yf2 <- ggplot() + 
+	geom_errorbar(data = dl3, 
+								aes(x = as.numeric(Load)-dodge_size0, y = M, 
+										ymin = lower.conf, ymax = upper.conf, color = Congruency),
+								width=error_width, size=1,
+								position = position_dodge(width = dodge_size2)) +
+	geom_errorbar(data = dl4, 
+								aes(x = as.numeric(Load)+dodge_size0, y = M, 
+										ymin = lower.conf, ymax = upper.conf, color = Congruency),
+								width=error_width, size=1,
+								position = position_dodge(width = dodge_size2)) +
+	geom_point(data = dl3, 
+						 aes(x = as.numeric(Load)-dodge_size0, y = M, color = Congruency), 
+						 size=4, shape = 21, fill = "white", 
+						 position = position_dodge(width = dodge_size2)) +
+	geom_point(data = dl4, 
+						 aes(x = as.numeric(Load)+dodge_size0, y = M, color = 
+						 			Congruency, fill = Congruency), 
+						 size=4, shape = 21, 
+						 position = position_dodge(width = dodge_size2)) +
+	scale_color_manual(values=c("#E69F00", "#56B4E9")) +
+	scale_fill_manual(values=c("#E69F00", "#56B4E9")) +
+	scale_x_continuous(breaks = c(1, 2), label = c("Low", "High")) +
+	coord_cartesian(xlim = c(0.5, 2.5), ylim = c(600, 900), clip = "on") +
+	scale_y_continuous(breaks=seq(600, 900, by=100)) +
+	labs(x = "Load",
+			 y = "Pain Identification Time (ms)",
+			 fill='Congruency')  +
+	theme_bw(base_size = 18) +
+	theme(panel.grid.major = element_blank(),
+				panel.grid.minor = element_blank(),
+				aspect.ratio = 1.3)
+yf2
+```
+
+
+
+<br><br>
+
+------------------------------------------------------------------------
+
+<br><br>
+
+
+
+# MPT Modeling
+
+[**multiTree**](https://www.sowi.uni-mannheim.de/en/erdfelder/research/software/multitree/)는 사용과정에서 human errors가 발생할 가능성이 있다. [**multiTreeR**](https://github.com/moshagen/multiTreeR)이 R과의 인터페이스 역할을 할 것으로 기대했으나 맥과 윈도우에서 모두 작동하지 않았다. 대신, [**MPTinR**](https://cran.r-project.org/web/packages/MPTinR/index.html) 패키지를 사용하여 모든 과정을 스크립트로 진행한다.
+
+## Tree Spec & Restriction
+
+```{r, fig.height=3}
+ggdraw() + draw_image("fig/Fig_mpt.png")
+```
+
+트리구조와 제약을 설정한다.
+
+```{r, comment=NA, collapse=TRUE}
+PIT2C.eqn <- "
+# tree for Low, Pain prime, Pain target: correct, then incorrect
+I1 + (1-I1)*U1 + (1-I1)*(1-U1)*B1
+(1-I1)*(1-U1)*(1-B1)
+# tree for Low, Pain prime, Nonpain target: correct, then incorrect
+I1 + (1-I1)*(1-U1)*(1-B1)
+(1-I1)*U1 + (1-I1)*(1-U1)*B1
+# tree for Low, Nonpain prime, Pain target: correct, then incorrect
+I1 + (1-I1)*(1-U1)*B1
+(1-I1)*U1 + (1-I1)*(1-U1)*(1-B1)
+# tree for Low, Nonpain prime, Nonpain target: correct, then incorrect
+I1 + (1-I1)*U1 + (1-I1)*(1-U1)*(1-B1)
+(1-I1)*(1-U1)*B1
+# tree for High, Pain prime, Pain target: correct, then incorrect
+I2 + (1-I2)*U2 + (1-I2)*(1-U2)*B2
+(1-I2)*(1-U2)*(1-B2)
+# tree for High, Pain prime, Nonpain target: correct, then incorrect
+I2 + (1-I2)*(1-U2)*(1-B2)
+(1-I2)*U2 + (1-I2)*(1-U2)*B2
+# tree for High, Nonpain prime, Pain target: correct, then incorrect
+I2 + (1-I2)*(1-U2)*B2
+(1-I2)*U2 + (1-I2)*(1-U2)*(1-B2)
+# tree for High, Nonpain prime, Nonpain target: correct, then incorrect
+I2 + (1-I2)*U2 + (1-I2)*(1-U2)*(1-B2)
+(1-I2)*(1-U2)*B2
+"
+
+restrict.0 <- "
+"
+
+restrict.1 <- "
+I1 = I2
+"
+
+restrict.2 <- "
+U1 = U2
+"
+
+restrict.3 <- "
+B1 = B2
+"
+
+check.mpt(
+	model.filename = textConnection(PIT2C.eqn),
+	model.type = "easy"
+)
+```
+
+## Deadline = 1sec
+
+[MPTinR](https://cran.r-project.org/web/packages/MPTinR/index.html)에 적합한 자료구조를 만든다.  기저모형(baseline model)을 적합하여(fitting) 파라미터를 추정한다. 
+
+```{r, collapse=TRUE}
+cn <- dd %>% 
+	group_by(SID, Load, Prime, Target, PIT_corr1s) %>% 
+	summarise(N = n()) %>% 
+	ungroup() %>% 
+	mutate(Prime2 = ifelse(Prime == "Pain", "P", "N"),
+				 Target2 = ifelse(Target == "Pain", "P", "N"),
+				 Corr2 = ifelse(PIT_corr1s == 1, "Corr", "Incorr")) %>% 
+	select(SID, Load, Prime2, Target2, Corr2, N) %>% 
+	arrange(SID, desc(Load), desc(Prime2), desc(Target2), Corr2) %>% 
+	unite("Condition", Load:Corr2, sep = "") %>% 
+	pivot_wider(names_from = "Condition", values_from = "N") %>% 
+	select(!SID) %>% 
+	replace(is.na(.), 0)
+
+col_order <- c("LowPPCorr", "LowPPIncorr",
+							 "LowPNCorr", "LowPNIncorr",
+							 "LowNPCorr", "LowNPIncorr",
+							 "LowNNCorr", "LowNNIncorr",
+							 "HighPPCorr", "HighPPIncorr",
+							 "HighPNCorr", "HighPNIncorr",
+							 "HighNPCorr", "HighNPIncorr",
+							 "HighNNCorr", "HighNNIncorr")
+cn <- cn[, col_order]
+# cn %>% print(n = Inf)	
+
+# model fitting
+mC.0 <- fit.mpt(
+	data = cn,
+	model.filename = textConnection(PIT2C.eqn),
+	fia = 200000,
+)
+```
+
+이제 기저모형의 적합도를 보자.
+
+```{r, collapse=TRUE}
+mC.0$goodness.of.fit$individual %>%
+	mutate(SID = unique(td.slong$SID))
+	# kable(digits = 4, caption = "Individual Fits")
+
+# mC.0$goodness.of.fit$sum %>% 
+# 	kable(digits = 4, caption = "Sum of Indivisual Fits")
+
+wES <- sqrt( mC.0$goodness.of.fit$aggregated$G.Squared / sum(cn) )
+
+mC.0$goodness.of.fit$aggregated %>%
+	mutate(w = wES) %>% 
+	kable(digits = 2, caption = "Aggregated Fit")
+```
+
+Likelihood ratio $G^2$ statistic은 자료와 기대값의 차이를 가리킨다. 적합이 잘되면 이 값이 작아야 하므로 $p$-값이 유의미하지 않아야 한다($p$ < .05). 코드블럭에는 개인별(`$individual`) 적합 결과가 출력되어 있다. 특히 13, 22, 40번째 줄의 참가자는 자료가 모형에 적합되지 않았음을 쉽게 알 수 있다. 하단에는 전체 합산(`$aggregated`) 결과가 보인다. 이 값은 [**multiTree**](https://www.sowi.uni-mannheim.de/en/erdfelder/research/software/multitree/)와 결과와 정확히 일치한다.
+
+모형 적합을 평가하는 두 번째 기준은 효과크기이다. 자료와 기대값의 차이가 클수록 효과 크기가 커지기 때문에, 모형 적합에서는 효과 크기가 작을수록 좋다. $r$-family static인 $w = \sqrt{\frac{\chi^2}{n}}$ < .05이면 자료가 모형에 적합되었다고 간주한다.
+
+효과크기 $w$ = `r format(wES, digits = 2)`이므로 적합이 충분하다고 볼 수 있다. 
+
+
+<br><br>
+
+
+### Estimated Parameters
+
+파라미터 추정치는 아래와 같다.
+
+```{r}
+mC.0$parameters$aggregated %>% 
+	kable(digits = 2, caption = "Parameter Estimates")
+```
+
+
+<br><br>
+
+
+### Hypothesis Testing 
+
+이제 제약된 모형들을 적합시킨다. 파라미터가 중요하다면, 제약된 모형이 기저모형보다 나쁠 것이다. $G^2$가 커지면서 $p$-값은 작아지고, 효과크기 $w$도 작아야 한다.
+
+```{r, collapse=TRUE}
+mC.1 <- fit.mpt(
+	data = cn,
+	model.filename = textConnection(PIT2C.eqn),
+	restrictions.filename = textConnection(restrict.1),
+	fia = 20000
+)
+
+mC.2 <- fit.mpt(
+	data = cn,
+	model.filename = textConnection(PIT2C.eqn),
+	restrictions.filename = textConnection(restrict.2),
+	fia = 20000
+)
+
+mC.3 <- fit.mpt(
+	data = cn,
+	model.filename = textConnection(PIT2C.eqn),
+	restrictions.filename = textConnection(restrict.3),
+	fia = 20000
+)
+```
+
+파라미터를 제약한 대안모형을 기저모형에 비교하였다. 두 모형의 차이가 클수록 $\Delta G^2$와 효과크기 $w$가 커지고 $p$-값은 작아질 것이다. 
+
+```{r, collapse=TRUE}
+# C-dominating
+( g.sq.I.equal <- mC.1[["goodness.of.fit"]][["aggregated"]][["G.Squared"]] - 
+		mC.0[["goodness.of.fit"]][["aggregated"]][["G.Squared"]] )
+( df.I.equal <- mC.1[["goodness.of.fit"]][["aggregated"]][["df"]] - 
+		mC.0[["goodness.of.fit"]][["aggregated"]][["df"]] )
+( p.value.I.equal <- pchisq(g.sq.I.equal, df.I.equal , lower.tail = FALSE) )
+( w.I.equal <- sqrt(g.sq.I.equal/sum(cn)) )
+
+# format(round(p.value.I.equal,10), nsmall = 10)
+
+( g.sq.U.equal <- mC.2[["goodness.of.fit"]][["aggregated"]][["G.Squared"]] - 
+		mC.0[["goodness.of.fit"]][["aggregated"]][["G.Squared"]] )
+( df.U.equal <- mC.2[["goodness.of.fit"]][["aggregated"]][["df"]] - 
+		mC.0[["goodness.of.fit"]][["aggregated"]][["df"]] )
+( p.value.U.equal <- pchisq(g.sq.U.equal, df.U.equal , lower.tail = FALSE) )
+( w.U.equal <- sqrt(g.sq.U.equal/sum(cn)) )
+
+( g.sq.B.equal <- mC.3[["goodness.of.fit"]][["aggregated"]][["G.Squared"]] - 
+		mC.0[["goodness.of.fit"]][["aggregated"]][["G.Squared"]] )
+( df.B.equal <- mC.3[["goodness.of.fit"]][["aggregated"]][["df"]] - 
+		mC.0[["goodness.of.fit"]][["aggregated"]][["df"]] )
+( p.value.B.equal <- pchisq(g.sq.B.equal, df.B.equal , lower.tail = FALSE) )
+( w.B.equal <- sqrt(g.sq.B.equal/sum(cn)) )
+
+mC.table <- tibble(Parameter = c("IE", "UE", "RB"),
+									 G_squared = c(0, 0, 0), df = c(0, 0, 0), 
+									 p = c(0, 0, 0), w = c(0, 0, 0))
+
+mC.table$G_squared[1] <- g.sq.I.equal
+mC.table$df[1] <- df.I.equal
+mC.table$p[1] <- p.value.I.equal
+mC.table$w[1] <- w.I.equal
+
+mC.table$G_squared[2] <- g.sq.U.equal
+mC.table$df[2] <- df.U.equal
+mC.table$p[2] <- p.value.U.equal
+mC.table$w[2] <- w.U.equal
+
+mC.table$G_squared[3] <- g.sq.B.equal
+mC.table$df[3] <- df.B.equal
+mC.table$p[3] <- p.value.B.equal
+mC.table$w[3] <- w.B.equal
+
+mC.table$bonferroni.p <- p.adjust(mC.table$p, "bonferroni")
+mC.table %>% 
+	select(Parameter, G_squared, df, p, bonferroni.p, w) %>% 
+	kable(digits = c(0, 2, 0, 5, 2, 2), caption = "C-First, Deadline = 1s")
+```
+
+
+기저모형에 비해 **high load** 조건과 **low load** 조건의 `Intentional Empathy` 파라미터가 같다고 가정한 모형의 적합도가 유의미하게 낮았다, $\Delta G^2$ (`r df.I.equal`) = `r format(round(g.sq.I.equal, 3), nsmall = 3)`, $p$ = `r format(round(mC.table$bonferroni.p[1], 10), nsmall = 10)`, $w$ = `r format(round(w.I.equal, 3), nsamll = 3)`.
+
+**high load** 조건과 **low load** 조건의 `Unintentional Empathy` 파라미터가 같다고 가정한 모형과 기저모형은 유의미하게 다르지 않았다, $\Delta G^2$ (`r df.U.equal`) = `r format(round(g.sq.U.equal, 3), nsmall = 3)`, $p$ = `r format(round(mC.table$bonferroni.p[2], 3), nsmall = 3)`, $w$ = `r format(round(w.U.equal, 3), nsamll = 3)`.
+
+**high load** 조건과 **low load** 조건의 `Bias` 파라미터가 같다고 가정한 모형과 기저모형은 유의미하게 다르지 않았다, $\Delta G^2$ (`r df.B.equal`) = `r format(round(g.sq.B.equal, 3), nsmall = 3)`, $p$ = `r format(round(mC.table$bonferroni.p[3], 3), nsmall = 3)`, $w$ = `r format(round(w.B.equal, 3), nsamll = 3)`.
+
+
+### Individual Estimates
+
+```{r}
+# 개인별 파라미터 추정치 정리 
+resParamInd <- as.data.frame.table(mC.0$parameters$individual) %>% 
+	filter(Var2 == "estimates") %>% 
+	separate(col = "Var3", into = c("dum", "sid"), sep = ": ") %>% 
+	rename(estimate = Freq) %>% 
+	mutate(parameter = factor(rep(c('Bias', 'Intention', 'Unintention'), each = 2, times = 38)),
+				 load = factor(rep(c('Low', 'High'), times = 3*38), levels = c('Low', 'High'), 
+				 							labels = c('Low', 'High'))) %>% 
+	select(sid, Var1, parameter, load, estimate)
+
+sumParamInd <- resParamInd %>% 
+	group_by(parameter, load) %>%
+	get_summary_stats(estimate, show = c("mean", "sd", "ci"))
+
+# bootstrapped CI: adjusted bootstrap percentile (bca) method
+my.fun <- function(data, idx){
+	df <- data[idx]
+	return(mean(df))
+}
+
+tmpCI <- resParamInd %>% 
+	split(~parameter + load) %>% 
+	map_dfr(
+		function(x){
+			tmp = boot.ci(boot(data=x$estimate, statistic=my.fun, R=nsims), type = "bca")$bca
+			parameter <- x$parameter[1]
+			load <- x$load[1]
+			bootCI_lo <- tmp[4]
+			bootCI_hi <- tmp[5]
+			data.frame(parameter, load, bootCI_lo, bootCI_hi)
+		}
+	)
+
+merge(sumParamInd, tmpCI, by = c("parameter", "load")) %>% 
+	kable(digits = 2, caption = "Parameter Estimates: Descriptive Stats")
+
+TparamInd <- tibble(Parameter = c("IE", "UE", "RB"), 
+										t = c(0, 0, 0), df = c(0, 0, 0), 
+										p = c(0, 0, 0), bonferroni.p = c(0, 0, 0), d = c(0, 0, 0))
+
+# permutation t test
+# intention
+tmp <- perm.t.test(
+	filter(resParamInd, parameter == "Intention", load == "Low")$estimate,
+	filter(resParamInd, parameter == "Intention", load == "High")$estimate,
+	paired = TRUE, R = nsims)
+TparamInd$t[1] <- tmp$statistic
+TparamInd$df[1] <- tmp$parameter
+TparamInd$p[1] <- tmp$perm.p.value
+
+dxTmp <- ANOVA_design(
+	design = "2w", 
+	n = filter(sumParamInd, parameter == "Intention")$n,
+	mu = filter(sumParamInd, parameter == "Intention")$mean, 
+	sd = filter(sumParamInd, parameter == "Intention")$sd,
+	labelnames = c("LOAD", "Low", "High"),
+	plot = FALSE)
+tmp <- ANOVA_power(dxTmp, verbose = FALSE, nsims = nsims)
+TparamInd$d[1] <- tmp$pc_results$effect_size
+
+# unintention
+tmp <- perm.t.test(
+	filter(resParamInd, parameter == "Unintention", load == "Low")$estimate,
+	filter(resParamInd, parameter == "Unintention", load == "High")$estimate,
+	paired = TRUE, R = nsims)
+TparamInd$t[2] <- tmp$statistic
+TparamInd$df[2] <- tmp$parameter
+TparamInd$p[2] <- tmp$perm.p.value
+
+dxTmp <- ANOVA_design(
+	design = "2w", 
+	n = filter(sumParamInd, parameter == "Unintention")$n,
+	mu = filter(sumParamInd, parameter == "Unintention")$mean, 
+	sd = filter(sumParamInd, parameter == "Unintention")$sd,
+	labelnames = c("LOAD", "Low", "High"),
+	plot = FALSE)
+tmp <- ANOVA_power(dxTmp, verbose = FALSE, nsims = nsims)
+TparamInd$d[2] <- tmp$pc_results$effect_size
+
+# bias
+tmp <- perm.t.test(
+	filter(resParamInd, parameter == "Bias", load == "Low")$estimate,
+	filter(resParamInd, parameter == "Bias", load == "High")$estimate,
+	paired = TRUE, R = nsims)
+TparamInd$t[3] <- tmp$statistic
+TparamInd$df[3] <- tmp$parameter
+TparamInd$p[3] <- tmp$perm.p.value
+
+dxTmp <- ANOVA_design(
+	design = "2w", 
+	n = filter(sumParamInd, parameter == "Bias")$n,
+	mu = filter(sumParamInd, parameter == "Bias")$mean, 
+	sd = filter(sumParamInd, parameter == "Bias")$sd,
+	labelnames = c("LOAD", "Low", "High"),
+	plot = FALSE)
+tmp <- ANOVA_power(dxTmp, verbose = FALSE, nsims = nsims)
+TparamInd$d[3] <- tmp$pc_results$effect_size
+
+TparamInd$bonferroni.p <- p.adjust(TparamInd$p, "bonferroni")
+TparamInd %>% 
+	kable(digits = c(0, 2, 0, 2, 2, 2), caption = "Pairwise comparisons")
+```
+
+
+
+### Correlation with WM
+
+```{r}
+# 파라미터와 작업기억 상관
+datParamInd <- resParamInd %>%
+	unite("Var", c(load, parameter)) %>%
+	pivot_wider(id_cols = sid, names_from = Var, values_from = estimate) %>%
+	mutate(sid2 = unique(td.slong$SID),
+				 SID = wd$SID,
+				 WM = wk$cowanK) %>%
+	select(SID, WM, starts_with("Low"), starts_with("High"))
+
+RR <- datParamInd %>% select(!SID) %>% cor_mat()
+PP <- RR %>% cor_get_pval()
+
+pbon <- p.adjust(PP$WM[2:7], "bonferroni")
+
+tibble(parameter = c("Pearson r", "Bonf.corr.p"),
+			 lowIE = c(RR$WM[3], pbon[2]),
+			 lowUE = c(RR$WM[4], pbon[3]),
+			 lowRB = c(RR$WM[2], pbon[1]),
+			 highIE = c(RR$WM[6], pbon[5]),
+			 highUE = c(RR$WM[7], pbon[6]),
+			 highRB = c(RR$WM[5], pbon[4])) %>% 
+	kable(align = 'c', digits = 3, caption = "Parameters vs. Cowan's K")
+
+rh1 <- datParamInd %>% 
+	ggplot(aes(x = WM, y = Low_Intention)) +
+	geom_point(size = 3) +
+	geom_smooth(method = lm, formula = y ~ x) +
+	scale_x_continuous(breaks=seq(0, 4, by=0.5)) +
+	scale_y_continuous(breaks=seq(0.0, 1.0, by=0.2)) +
+	coord_cartesian(ylim = c(0.0, 1.0), clip = "on") +
+	labs(x = expression(paste("Cowan's ", italic("K"))), 
+			 y = expression(italic("IE")["Low, 1-sec"])) +
+	theme_bw(base_size = 18) +
+	theme(panel.grid.major = element_blank(),
+				panel.grid.minor = element_blank(),
+				aspect.ratio = 1) +
+	annotate(geom = "text", x = 2, y = .1, hjust = 0, size = 4,
+					 label = "paste(italic(r), \" = .48, \", italic(p), \" < .05\")", parse = TRUE)
+
+rh2 <- datParamInd %>% 
+	ggplot(aes(x = WM, y = High_Intention)) +
+	geom_point(size = 3) +
+	geom_smooth(method = lm, formula = y ~ x) +
+	scale_x_continuous(breaks=seq(0, 4, by=0.5)) +
+	scale_y_continuous(breaks=seq(0.0, 1.0, by=0.2)) +
+	coord_cartesian(ylim = c(0.0, 1.0), clip = "on") +
+	labs(x = expression(paste("Cowan's ", italic("K"))), 
+			 y = expression(italic("IE")["High, 1-sec"])) +
+	theme_bw(base_size = 18) +
+	theme(panel.grid.major = element_blank(),
+				panel.grid.minor = element_blank(),
+				aspect.ratio = 1) +
+	annotate(geom = "text", x = 1.0, y = .55, hjust = 0, size = 4,
+					 label = "paste(italic(r), \" = .46, \", italic(p), \" < .05\")", parse = TRUE)
+
+plot_grid(rh1, rh2, labels = c("A", "B"), label_size = 22, nrow = 1)
+```
+
+
+
+<br><br><br><br>
+
+
+
+## Deadline = 2sec
+
+```{r, collapse=TRUE}
+cx <- dd %>% 
+	group_by(SID, Load, Prime, Target, PIT_corr2s) %>% 
+	summarise(N = n()) %>% 
+	ungroup() %>% 
+	mutate(Prime2 = ifelse(Prime == "Pain", "P", "N"),
+				 Target2 = ifelse(Target == "Pain", "P", "N"),
+				 Corr2 = ifelse(PIT_corr2s == 1, "Corr", "Incorr")) %>% 
+	select(SID, Load, Prime2, Target2, Corr2, N) %>% 
+	arrange(SID, desc(Load), desc(Prime2), desc(Target2), Corr2) %>% 
+	unite("Condition", Load:Corr2, sep = "") %>% 
+	pivot_wider(names_from = "Condition", values_from = "N") %>% 
+	select(!SID) %>% 
+	replace(is.na(.), 0)
+
+cx <- cx[, col_order]
+# cx %>% print(n = Inf)	
+
+mC2.0 <- fit.mpt(
+	data = cx,
+	model.filename = textConnection(PIT2C.eqn),
+	fia = 200000,
+)
+
+mC2.0$goodness.of.fit$individual %>%
+	mutate(SID = unique(td.slong$SID))
+	# kable(digits = 4, caption = "Individual Fits")
+
+# mC2.0$goodness.of.fit$sum %>% 
+# 	kable(digits = 4, caption = "Sum of Indivisual Fits")
+
+mC2.0$goodness.of.fit$aggregated %>%
+	mutate(w = sqrt( mC2.0$goodness.of.fit$aggregated$G.Squared / sum(cn) )) %>% 
+	kable(digits = 2, caption = "Aggregated Fit")
+```
+
+### Estimated Parameters
+
+```{r}
+mC2.0$parameters$aggregated %>% 
+	kable(digits = 2, caption = "Parameter Estimates")
+```
+
+### Hypothesis Testing 
+
+```{r, collapse=TRUE}
+mC2.1 <- fit.mpt(
+	data = cx,
+	model.filename = textConnection(PIT2C.eqn),
+	restrictions.filename = textConnection(restrict.1),
+	fia = 20000
+)
+
+mC2.2 <- fit.mpt(
+	data = cx,
+	model.filename = textConnection(PIT2C.eqn),
+	restrictions.filename = textConnection(restrict.2),
+	fia = 20000
+)
+
+mC2.3 <- fit.mpt(
+	data = cx,
+	model.filename = textConnection(PIT2C.eqn),
+	restrictions.filename = textConnection(restrict.3),
+	fia = 20000
+)
+
+# C-dominating
+( g.sq.I.equal2 <- mC2.1[["goodness.of.fit"]][["aggregated"]][["G.Squared"]] - 
+		mC2.0[["goodness.of.fit"]][["aggregated"]][["G.Squared"]] )
+( df.I.equal2 <- mC2.1[["goodness.of.fit"]][["aggregated"]][["df"]] - 
+		mC2.0[["goodness.of.fit"]][["aggregated"]][["df"]] )
+( p.value.I.equal2 <- pchisq(g.sq.I.equal2, df.I.equal2 , lower.tail = FALSE) )
+( w.I.equal2 <- sqrt(g.sq.I.equal2/sum(cx)) )
+
+( g.sq.U.equal2 <- mC2.2[["goodness.of.fit"]][["aggregated"]][["G.Squared"]] - 
+		mC2.0[["goodness.of.fit"]][["aggregated"]][["G.Squared"]] )
+( df.U.equal2 <- mC2.2[["goodness.of.fit"]][["aggregated"]][["df"]] - 
+		mC2.0[["goodness.of.fit"]][["aggregated"]][["df"]] )
+( p.value.U.equal2 <- pchisq(g.sq.U.equal2, df.U.equal2 , lower.tail = FALSE) )
+( w.U.equal2 <- sqrt(g.sq.U.equal2/sum(cx)) )
+
+( g.sq.B.equal2 <- mC2.3[["goodness.of.fit"]][["aggregated"]][["G.Squared"]] - 
+		mC2.0[["goodness.of.fit"]][["aggregated"]][["G.Squared"]] )
+( df.B.equal2 <- mC2.3[["goodness.of.fit"]][["aggregated"]][["df"]] - 
+		mC2.0[["goodness.of.fit"]][["aggregated"]][["df"]] )
+( p.value.B.equal2 <- pchisq(g.sq.B.equal2, df.B.equal2 , lower.tail = FALSE) )
+( w.B.equal2 <- sqrt(g.sq.B.equal2/sum(cx)) )
+
+
+mC.table2 <- tibble(Parameter = c("IE", "UE", "RB"),
+									 G_squared = c(0, 0, 0), df = c(0, 0, 0), 
+									 p = c(0, 0, 0), w = c(0, 0, 0))
+
+mC.table2$G_squared[1] <- g.sq.I.equal2
+mC.table2$df[1] <- df.I.equal2
+mC.table2$p[1] <- p.value.I.equal2
+mC.table2$w[1] <- w.I.equal2
+
+mC.table2$G_squared[2] <- g.sq.U.equal2
+mC.table2$df[2] <- df.U.equal2
+mC.table2$p[2] <- p.value.U.equal2
+mC.table2$w[2] <- w.U.equal2
+
+mC.table2$G_squared[3] <- g.sq.B.equal2
+mC.table2$df[3] <- df.B.equal2
+mC.table2$p[3] <- p.value.B.equal2
+mC.table2$w[3] <- w.B.equal2
+
+mC.table2$bonferroni.p <- p.adjust(mC.table2$p, "bonferroni")
+mC.table2 %>% 
+	select(Parameter, G_squared, df, p, bonferroni.p, w) %>% 
+	kable(digits = c(0, 2, 0, 2, 2, 2), caption = "C-First, Deadline = 2s")
+```
+
+
+
+### Individual Estimates
+
+```{r}
+# 개인별 파라미터 추정치 정리 
+resParamInd2 <- as.data.frame.table(mC2.0$parameters$individual) %>% 
+	filter(Var2 == "estimates") %>% 
+	separate(col = "Var3", into = c("dum", "sid"), sep = ": ") %>% 
+	rename(estimate = Freq) %>% 
+	mutate(parameter = factor(rep(c('Bias', 'Intention', 'Unintention'), each = 2, times = 38)),
+				 load = factor(rep(c('Low', 'High'), times = 3*38), levels = c('Low', 'High'), 
+				 							labels = c('Low', 'High'))) %>% 
+	select(sid, Var1, parameter, load, estimate)
+
+sumParamInd2 <- resParamInd2 %>% 
+	group_by(parameter, load) %>%
+	get_summary_stats(estimate, show = c("mean", "sd", "ci"))
+
+# bootstrapped CI: adjusted bootstrap percentile (bca) method
+tmpCI <- resParamInd2 %>% 
+	split(~parameter + load) %>% 
+	map_dfr(
+		function(x){
+			tmp = boot.ci(boot(data=x$estimate, statistic=my.fun, R=nsims), type = "bca")$bca
+			parameter <- x$parameter[1]
+			load <- x$load[1]
+			bootCI_lo <- tmp[4]
+			bootCI_hi <- tmp[5]
+			data.frame(parameter, load, bootCI_lo, bootCI_hi)
+		}
+	)
+
+merge(sumParamInd2, tmpCI, by = c("parameter", "load")) %>% 
+	kable(digits = 2, caption = "Parameter Estimates: Descriptive Stats")
+
+
+TparamInd2 <- tibble(Parameter = c("IE", "UE", "RB"), 
+										t = c(0, 0, 0), df = c(0, 0, 0), 
+										p = c(0, 0, 0), bonferroni.p = c(0, 0, 0), d = c(0, 0, 0))
+
+# permutation t test
+# intention
+tmp <- perm.t.test(
+	filter(resParamInd2, parameter == "Intention", load == "Low")$estimate,
+	filter(resParamInd2, parameter == "Intention", load == "High")$estimate,
+	paired = TRUE, R = nsims)
+TparamInd2$t[1] <- tmp$statistic
+TparamInd2$df[1] <- tmp$parameter
+TparamInd2$p[1] <- tmp$perm.p.value
+
+dxTmp <- ANOVA_design(
+	design = "2w", 
+	n = filter(sumParamInd2, parameter == "Intention")$n,
+	mu = filter(sumParamInd2, parameter == "Intention")$mean, 
+	sd = filter(sumParamInd2, parameter == "Intention")$sd,
+	labelnames = c("LOAD", "Low", "High"),
+	plot = FALSE)
+tmp <- ANOVA_power(dxTmp, verbose = FALSE, nsims = nsims)
+TparamInd2$d[1] <- tmp$pc_results$effect_size
+
+# unintention
+tmp <- perm.t.test(
+	filter(resParamInd2, parameter == "Unintention", load == "Low")$estimate,
+	filter(resParamInd2, parameter == "Unintention", load == "High")$estimate,
+	paired = TRUE, R = nsims)
+TparamInd2$t[2] <- tmp$statistic
+TparamInd2$df[2] <- tmp$parameter
+TparamInd2$p[2] <- tmp$perm.p.value
+
+dxTmp <- ANOVA_design(
+	design = "2w", 
+	n = filter(sumParamInd2, parameter == "Unintention")$n,
+	mu = filter(sumParamInd2, parameter == "Unintention")$mean, 
+	sd = filter(sumParamInd2, parameter == "Unintention")$sd,
+	labelnames = c("LOAD", "Low", "High"),
+	plot = FALSE)
+tmp <- ANOVA_power(dxTmp, verbose = FALSE, nsims = nsims)
+TparamInd2$d[2] <- tmp$pc_results$effect_size
+
+# bias
+tmp <- perm.t.test(
+	filter(resParamInd2, parameter == "Bias", load == "Low")$estimate,
+	filter(resParamInd2, parameter == "Bias", load == "High")$estimate,
+	paired = TRUE, R = nsims)
+TparamInd2$t[3] <- tmp$statistic
+TparamInd2$df[3] <- tmp$parameter
+TparamInd2$p[3] <- tmp$perm.p.value
+
+dxTmp <- ANOVA_design(
+	design = "2w", 
+	n = filter(sumParamInd2, parameter == "Bias")$n,
+	mu = filter(sumParamInd2, parameter == "Bias")$mean, 
+	sd = filter(sumParamInd2, parameter == "Bias")$sd,
+	labelnames = c("LOAD", "Low", "High"),
+	plot = FALSE)
+tmp <- ANOVA_power(dxTmp, verbose = FALSE, nsims = nsims)
+TparamInd2$d[3] <- tmp$pc_results$effect_size
+
+TparamInd2$bonferroni.p <- p.adjust(TparamInd2$p, "bonferroni")
+TparamInd2 %>% 
+	kable(digits = c(0, 2, 0, 2, 2, 2), caption = "Pairwise comparisons")
+```
+
+
+
+### Correlation with WM
+
+```{r}
+datParamInd2 <- resParamInd2 %>%
+	unite("Var", c(load, parameter)) %>%
+	pivot_wider(id_cols = sid, names_from = Var, values_from = estimate) %>%
+	mutate(sid2 = unique(td.slong$SID),
+				 SID = wd$SID,
+				 WM = wk$cowanK) %>%
+	select(SID, WM, starts_with("Low"), starts_with("High")) 
+
+RR2 <- datParamInd2 %>% select(!SID) %>% cor_mat() 
+PP2 <- RR2 %>% cor_get_pval()
+
+pbon2 <- p.adjust(PP2$WM[2:7], "bonferroni")
+
+tibble(parameter = c("Pearson r", "Bonf.corr.p"),
+			 lowIE = c(RR2$WM[3], pbon2[2]),
+			 lowUE = c(RR2$WM[4], pbon2[3]),
+			 lowRB = c(RR2$WM[2], pbon2[1]),
+			 highIE = c(RR2$WM[6], pbon2[5]),
+			 highUE = c(RR2$WM[7], pbon2[6]),
+			 highRB = c(RR2$WM[5], pbon2[4])) %>% 
+	kable(align = 'c', digits = 3, caption = "Parameters vs. Cowan's K")
+
+rh3 <- datParamInd2 %>% 
+	ggplot(aes(x = WM, y = Low_Intention)) +
+	geom_point(size = 3) +
+	geom_smooth(method = lm, formula = y ~ x) +
+	scale_x_continuous(breaks=seq(0, 4, by=0.5)) +
+	scale_y_continuous(breaks=seq(0.0, 1.0, by=0.2)) +
+	coord_cartesian(ylim = c(0.0, 1.0), clip = "on") +
+	labs(x = expression(paste("Cowan's ", italic("K"))), 
+			 y = expression(italic("IE")["Low, 2-sec"])) +
+	theme_bw(base_size = 18) +
+	theme(panel.grid.major = element_blank(),
+				panel.grid.minor = element_blank(),
+				aspect.ratio = 1) +
+	annotate(geom = "text", x = 2, y = .1, hjust = 0, size = 4,
+					 label = "paste(italic(r), \" = .45, \", italic(p), \" < .05\")", parse = TRUE)
+
+rh4 <- datParamInd2 %>% 
+	ggplot(aes(x = WM, y = High_Intention)) +
+	geom_point(size = 3) +
+	geom_smooth(method = lm, formula = y ~ x) +
+	scale_x_continuous(breaks=seq(0, 4, by=0.5)) +
+	scale_y_continuous(breaks=seq(0.0, 1.0, by=0.2)) +
+	coord_cartesian(ylim = c(0.0, 1.0), clip = "on") +
+	labs(x = expression(paste("Cowan's ", italic("K"))), 
+			 y = expression(italic("IE")["High, 2-sec"])) +
+	theme_bw(base_size = 18) +
+	theme(panel.grid.major = element_blank(),
+				panel.grid.minor = element_blank(),
+				aspect.ratio = 1) +
+	annotate(geom = "text", x = 2, y = .1, hjust = 0, size = 4,
+					 label = "paste(italic(r), \" = .67, \", italic(p), \" < .05\")", parse = TRUE)
+
+plot_grid(rh3, rh4, labels = c("A", "B"), label_size = 22, nrow = 1)
+```
+
+
+<br><br><br><br>
+
+
+## Plot
+
+```{r, collapse=TRUE}
+# merge parameters over 2 deadlines
+xParam <- rbind(mC.0[["parameters"]][["aggregated"]], # 1s
+								mC2.0[["parameters"]][["aggregated"]]) # 2s
+class(xParam)
+
+xParam$Deadline <- factor(rep(c('DL1s', 'DL2s'), each = 6))
+xParam$parameter <- factor(rep(c('Bias', 'Intention', 'Unintention'), each = 2, times = 2))
+xParam$Load <- factor(rep(c('Low', 'High'), 6), levels = c('Low', 'High'), 
+											labels = c('Low', 'High'))
+xParam <- xParam %>% select(parameter, Deadline, Load, estimates, lower.conf, upper.conf)
+str(xParam)
+
+# plot
+dodge_size <- 0.4
+error_width <- 0.3
+nudge_size <- 0.1
+ypos <- xParam %>% filter(parameter == "Intention", Deadline == "DL1s")
+
+zf1 <- xParam %>% 
+	filter(parameter == "Intention") %>% 
+	ggplot(aes(x = Load, y = estimates, fill = Deadline)) +
+	geom_errorbar(aes(ymin = lower.conf, ymax = upper.conf), width=error_width, size=1,
+								position = position_dodge(width = dodge_size) ) +
+	geom_point(size=4, shape=21, position = position_dodge(width = dodge_size)) +
+	coord_cartesian(ylim = c(0.2, 1.0), clip = "on") +
+	scale_y_continuous(breaks=seq(0.2, 1.0, by=0.1)) +
+	scale_fill_manual(values=c("white", "black"), labels=c("1 sec", "2 sec")) +
+	labs(y = expression(paste("Intentional Empathy (", italic("IE"), ")")),
+			 fill = expression("Post-hoc\nDeadline")) +
+	theme_bw(base_size = 18) +
+	theme(panel.grid.major = element_blank(),
+				panel.grid.minor = element_blank(),
+				aspect.ratio = 1.3) +
+	draw_line(x = c(1-nudge_size, 2-nudge_size), color = "darkgray",
+						y = c(ypos$estimates[2]-nudge_size, ypos$estimates[2]-nudge_size)) +
+	draw_line(x = c(1-nudge_size, 1-nudge_size), color = "darkgray",
+						y = c(ypos$estimates[1]-nudge_size*3/4, ypos$estimates[2]-nudge_size)) +
+	draw_line(x = c(2-nudge_size, 2-nudge_size), color = "darkgray",
+						y = c(ypos$estimates[2]-nudge_size*3/4, ypos$estimates[2]-nudge_size)) +
+	draw_label("***", color = "darkgray",
+						 x = 1.5-nudge_size, y = ypos$estimates[2]-nudge_size*6/4, 
+						 vjust = 0.5, hjust = 0.5, size = 22, fontface = 'bold')
+zf1 
+
+zf2 <- xParam %>% 
+	filter(parameter == "Unintention") %>% 
+	ggplot(aes(x = Load, y = estimates, fill = Deadline)) +
+	geom_errorbar(aes(ymin = lower.conf, ymax = upper.conf), width=error_width, size=1,
+								position = position_dodge(width = dodge_size) ) +
+	geom_point(size=4, shape=21, position = position_dodge(width = dodge_size)) +
+	coord_cartesian(ylim = c(0.0, 0.8), clip = "on") +
+	scale_y_continuous(breaks=seq(0.0, 0.8, by=0.1)) +
+	scale_fill_manual(values=c("white", "black"), labels=c("1 sec", "2 sec")) +
+	labs(y = expression(paste("Unintentional Empathy (", italic("UE"), ")")),
+			 fill = expression("Post-hoc\nDeadline")) +
+	theme_bw(base_size = 18) +
+	theme(panel.grid.major = element_blank(),
+				panel.grid.minor = element_blank(),
+				aspect.ratio = 1.3)
+zf2 
+
+zf3 <- xParam %>% 
+	filter(parameter == "Bias") %>% 
+	ggplot(aes(x = Load, y = estimates, fill = Deadline)) +
+	geom_errorbar(aes(ymin = lower.conf, ymax = upper.conf), width=error_width, size=1,
+								position = position_dodge(width = dodge_size) ) +
+	geom_point(size=4, shape=21, position = position_dodge(width = dodge_size)) +
+	coord_cartesian(ylim = c(0.1, 0.9), clip = "on") +
+	scale_y_continuous(breaks=seq(0.1, 0.9, by=0.1)) +
+	scale_fill_manual(values=c("white", "black"), labels=c("1 sec", "2 sec")) +
+	labs(y = expression(paste("Response Bias (", italic("RB"), ")")),
+			 fill = expression("Post-hoc\nDeadline")) +
+	theme_bw(base_size = 18) +
+	theme(panel.grid.major = element_blank(),
+				panel.grid.minor = element_blank(),
+				aspect.ratio = 1.3)
+zf3
+```
+
+
+```{r, eval=FALSE, collapse=TRUE}
+# behavior
+prow2 <- plot_grid(yf1 + theme(legend.position="none"),
+									 yf2 + theme(legend.position="none"),
+									 labels = c("A", "B"), label_size = 22, nrow = 1)
+legend2 <- get_legend(yf2 + theme(legend.box.margin = margin(80, 0, 0, 0)))
+legend <- get_legend(zf3 + theme(legend.box.margin = margin(-100, 0, 0, 0)))
+legendX <- plot_grid(legend2, legend, ncol = 1, align = "v")
+
+plot_grid(NULL, prow2, legendX, NULL, rel_widths = c(0.5, 2, .5, 0.5), nrow = 1)
+
+# model parameters
+prow <- plot_grid(zf1 + theme(legend.position="none"), 
+									zf2 + theme(legend.position="none"),
+									zf3 + theme(legend.position="none"),
+									labels = c("A", "B", "C"), label_size = 22, nrow = 1)
+legend <- get_legend(zf3 + theme(legend.box.margin = margin(-50, 0, 0, 0)))
+
+plot_grid(prow, legend, rel_widths = c(3, .5))
+
+```
+
+
+
+<br><br><br><br>
+
+
+## A-First Model
+
+```{r, collapse=TRUE, fig.height=3}
+ggdraw() + draw_image("fig/mpt_AFirst.png")
+
+PIT2A.eqn <- "
+# tree for Low, Pain prime, Pain target: correct, then incorrect
+U1 + (1-U1)*I1 + (1-U1)*(1-I1)*B1
+(1-U1)*(1-I1)*(1-B1)
+# tree for Low, Pain prime, Nonpain target: correct, then incorrect
+(1-U1)*I1 + (1-U1)*(1-I1)*(1-B1)
+U1 + (1-U1)*(1-I1)*B1
+# tree for Low, Nonpain prime, Pain target: correct, then incorrect
+(1-U1)*I1 + (1-U1)*(1-I1)*B1
+U1 + (1-U1)*(1-I1)*(1-B1)
+# tree for Low, Nonpain prime, Nonpain target: correct, then incorrect
+U1 + (1-U1)*I1 + (1-U1)*(1-I1)*(1-B1)
+(1-U1)*(1-I1)*B1
+# tree for High, Pain prime, Pain target: correct, then incorrect
+U2 + (1-U2)*I2 + (1-U2)*(1-I2)*B2
+(1-U2)*(1-I2)*(1-B2)
+# tree for High, Pain prime, Nonpain target: correct, then incorrect
+(1-U2)*I2 + (1-U2)*(1-I2)*(1-B2)
+U2 + (1-U2)*(1-I2)*B2
+# tree for High, Nonpain prime, Pain target: correct, then incorrect
+(1-U2)*I2 + (1-U2)*(1-I2)*B2
+U2 + (1-U2)*(1-I2)*(1-B2)
+# tree for High, Nonpain prime, Nonpain target: correct, then incorrect
+U2 + (1-U2)*I2 + (1-U2)*(1-I2)*(1-B2)
+(1-U2)*(1-I2)*B2
+"
+
+check.mpt(
+	model.filename = textConnection(PIT2A.eqn),
+	model.type = "easy"
+)
+```
+
+### Deadline = 1sec
+
+```{r, collapse=TRUE}
+# model fitting
+mA.0 <- fit.mpt(
+	data = cn,
+	model.filename = textConnection(PIT2A.eqn),
+	fia = 200000,
+)
+
+mA.0$goodness.of.fit$aggregated %>%
+	mutate(w = sqrt( mA.0$goodness.of.fit$aggregated$G.Squared / sum(cn) )) %>% 
+	kable(digits = c(2,2,2,3,2), caption = "Aggregated Fit")
+```
+
+
+<br><br>
+
+
+#### Estimated Parameters
+
+```{r}
+mA.0$parameters$aggregated %>%
+	kable(digits = 2, caption = "Parameter Estimates")
+```
+
+
+<br><br>
+
+
+#### Hypothesis Testing 
+
+```{r, collapse=TRUE}
+mA.1 <- fit.mpt(
+	data = cn,
+	model.filename = textConnection(PIT2A.eqn),
+	restrictions.filename = textConnection(restrict.1),
+	fia = 20000
+)
+
+mA.2 <- fit.mpt(
+	data = cn,
+	model.filename = textConnection(PIT2A.eqn),
+	restrictions.filename = textConnection(restrict.2),
+	fia = 20000
+)
+
+mA.3 <- fit.mpt(
+	data = cn,
+	model.filename = textConnection(PIT2A.eqn),
+	restrictions.filename = textConnection(restrict.3),
+	fia = 20000
+)
+
+# A-dominating
+( g.sq.I.equal3 <- mA.1[["goodness.of.fit"]][["aggregated"]][["G.Squared"]] -
+		mC.0[["goodness.of.fit"]][["aggregated"]][["G.Squared"]] )
+( df.I.equal3 <- mA.1[["goodness.of.fit"]][["aggregated"]][["df"]] -
+		mA.0[["goodness.of.fit"]][["aggregated"]][["df"]] )
+( p.value.I.equal3 <- pchisq(g.sq.I.equal3, df.I.equal3 , lower.tail = FALSE) )
+( w.I.equal3 <- sqrt(g.sq.I.equal3/sum(cn)) )
+
+( g.sq.U.equal3 <- mA.2[["goodness.of.fit"]][["aggregated"]][["G.Squared"]] -
+		mC.0[["goodness.of.fit"]][["aggregated"]][["G.Squared"]] )
+( df.U.equal3 <- mA.2[["goodness.of.fit"]][["aggregated"]][["df"]] -
+		mC.0[["goodness.of.fit"]][["aggregated"]][["df"]] )
+( p.value.U.equal3 <- pchisq(g.sq.U.equal3, df.U.equal3 , lower.tail = FALSE) )
+( w.U.equal3 <- sqrt(g.sq.U.equal3/sum(cn)) )
+
+( g.sq.B.equal3 <- mA.3[["goodness.of.fit"]][["aggregated"]][["G.Squared"]] -
+		mC.0[["goodness.of.fit"]][["aggregated"]][["G.Squared"]] )
+( df.B.equal3 <- mA.3[["goodness.of.fit"]][["aggregated"]][["df"]] -
+		mC.0[["goodness.of.fit"]][["aggregated"]][["df"]] )
+( p.value.B.equal3 <- pchisq(g.sq.B.equal3, df.B.equal3 , lower.tail = FALSE) )
+( w.B.equal3 <- sqrt(g.sq.B.equal3/sum(cn)) )
+
+mC.table3 <- tibble(Parameter = c("IE", "UE", "RB"),
+										G_squared = c(0, 0, 0), df = c(0, 0, 0), 
+										p = c(0, 0, 0), w = c(0, 0, 0))
+
+mC.table3$G_squared[1] <- g.sq.I.equal3
+mC.table3$df[1] <- df.I.equal3
+mC.table3$p[1] <- p.value.I.equal3
+mC.table3$w[1] <- w.I.equal3
+
+mC.table3$G_squared[2] <- g.sq.U.equal3
+mC.table3$df[2] <- df.U.equal3
+mC.table3$p[2] <- p.value.U.equal3
+mC.table3$w[2] <- w.U.equal3
+
+mC.table3$G_squared[3] <- g.sq.B.equal3
+mC.table3$df[3] <- df.B.equal3
+mC.table3$p[3] <- p.value.B.equal3
+mC.table3$w[3] <- w.B.equal3
+
+mC.table3 %>% kable(digits = c(0, 2, 2, 5, 2), caption = "A-First, Deadline = 1s")
+```
+
+
+<br><br><br>
+
+
+### Model Comparison
+
+```{r}
+mcomp.res1 <- select.mpt(	list(mC.0, mA.0), output = "full")
+mcomp.res1[, c("model", "n.parameters" ,"G.Squared.aggregated", 
+							 "FIA.aggregated", "AIC.aggregated", "BIC.aggregated")] %>% 
+	mutate(model = c("C-First", "A-First")) %>% 
+	kable(digits = 4, caption = "Model Comparison")
+```
+
+두 모델은 거의 같다: 상대적 우위가 매번 바뀐다.
+그러나 파라미터 추정치가 다른데, A-dominating 모델에서 UE는 매우 낮다.
+
+
+<br><br>
+
+****
+
+<br><br>
+
+# Session Info
+
+```{r sinfo, collapse=TRUE}
+sessionInfo()
+```
